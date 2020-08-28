@@ -227,7 +227,7 @@ def uploadAttachment = { def pageId, String url, String fileName, String note ->
                 println "👍 Request success! ${resp.status}"
             }
             response.failure = { resp ->
-                println "😭 Request failed. Status ${resp.status}, ${resp.reason.toString(): ${resp.message.toString()}"
+                println "😭 Request failed. Status ${resp.status}, ${resp.reason.toString()}: ${resp.message.toString()}"
             }
         }
         println "🎁 Upload attempt result: ${result}"
