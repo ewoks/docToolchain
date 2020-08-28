@@ -86,6 +86,9 @@ def trythis(Closure action) {
                 println "please check your confluence credentials in "+configFile.canonicalPath
                 throw new Exception("missing authentication credentials")
                 break
+            case '403':
+                println ("HTTP 403" + error.response.data.toString().replaceAll("^.*Reason","Reason"))
+                break
             default:
                 println error.response.data
         }
@@ -153,6 +156,7 @@ def addLabels = { def pageId, def labelsArray ->
 def uploadAttachment = { def pageId, String url, String fileName, String note ->
     def is
     def localHash
+    println("🐙 ⬆⬆⬆ Uploading attachment ${fileName}, with note ${note} to pageId ${pageId} from location: ${url}")
     if (url.startsWith('http')) {
         is = new URL(url).openStream()
         //build a hash of the attachment
@@ -186,8 +190,10 @@ def uploadAttachment = { def pageId, String url, String fileName, String note ->
             query: [
                     'filename': fileName,
             ], headers: headers).data
+    println ("🛂 Checked if attachment '${fileName}' already exists on pageId '${pageId}', returned attachment will be checked.(GET ${config.confluence.api}content/${pageId}/child/attachment)")
     def http
     if (attachment.size==1) {
+        println "Attachment size == 1; [Exists] Build HttpClient with: content/${pageId}/child/attachment/<attachment.results[0]>/data"
         // attachment exists. need an update?
         def remoteHash = attachment.results[0].extensions.comment.replaceAll("(?sm).*#([^#]+)#.*",'$1')
         if (remoteHash!=localHash) {
@@ -196,24 +202,35 @@ def uploadAttachment = { def pageId, String url, String fileName, String note ->
             println "    updated attachment"
         }
     } else {
+        println "Attachment size != 1 [Doesn't exist] Build HttpClient with: content/${pageId}/child/attachment"
         http = new HTTPBuilder(config.confluence.api + 'content/' + pageId + '/child/attachment')
         if (config.confluence.proxy) {
             http.setProxy(config.confluence.proxy.host, config.confluence.proxy.port, config.confluence.proxy.schema ?: 'http')
         }
     }
+    println "Passed check if attachment already exists, prepared HttpClient depending of it."
     if (http) {
-        http.request(Method.POST) { req ->
+        println("HttpClient prepared, will execute POST with multipart")
+        def results = http.request(Method.POST) { req ->
             requestContentType: "multipart/form-data"
             MultipartEntity multiPartContent = new MultipartEntity(HttpMultipartMode.BROWSER_COMPATIBLE)
-            // Adding Multi-part file parameter "file"
+            println "Adding Multi-part file parameter 'file'=InputStream of ${fileName}"
             multiPartContent.addPart("file", new InputStreamBody(is, fileName))
-            // Adding another string parameter "comment"
+            println "Adding another string parameter 'comment'=${note}↵#${localHash}#"
             multiPartContent.addPart("comment", new StringBody(note + "\r\n#" + localHash + "#"))
             req.setEntity(multiPartContent)
             headers.each { key, value ->
+                println("Adding header ${key}:${value}")
                 req.addHeader(key, value)
             }
+            response.success = { resp ->
+                println "👍 Request success! ${resp.status}"
+            }
+            response.failure = { resp ->
+                println "😭 Request failed. Status ${resp.status}, ${resp.data.toString().replaceAll("^.*Reason","Reason")}"
+            }
         }
+        println "🎁 Upload attempt result: ${result}"
     }
 }
 
@@ -475,6 +492,7 @@ def parseBody =  { body, anchors, pageAnchors ->
     body.select('div.arc42help').unwrap()
     body.select('div.title').wrap("<strong></strong>").before("<br />").wrap("<div></div>")
     body.select('div.listingblock').wrap("<p></p>").unwrap()
+
     // see if we can find referenced images and fetch them
     new File("tmp/images/.").mkdirs()
     // find images, extract their URLs for later uploading (after we know the pageId) and replace them with this macro:
@@ -483,18 +501,19 @@ def parseBody =  { body, anchors, pageAnchors ->
     // </ac:image>
     body.select('img').each { img ->
         img.attributes().each { attribute ->
-            //println attribute.dump()
+            println "Image attribute: " + attribute.dump()
         }
         def src = img.attr('src')
         def imgWidth = img.attr('width')?:500
         def imgAlign = img.attr('align')?:"center"
-        println "    image: "+src
 
         //it is not an online image, so upload it to confluence and use the ri:attachment tag
         if(!src.startsWith("http")) {
           def newUrl = baseUrl.toString().replaceAll('\\\\','/').replaceAll('/[^/]*$','/')+src
           def fileName = java.net.URLDecoder.decode((src.tokenize('/')[-1]),"UTF-8")
           newUrl = java.net.URLDecoder.decode(newUrl,"UTF-8")
+          println "Found image in body image: "+src
+          println "🤳 It's not an online image (${fileName}), so upload it to confluence and use the ri:attachment tag"
 
           trythis {
               deferredUpload <<  [0,newUrl,fileName,"automatically uploaded"]
@@ -504,7 +523,9 @@ def parseBody =  { body, anchors, pageAnchors ->
         // it is an online image, so we have to use the ri:url tag
         else {
           img.after("<ac:image ac:align=\"imgAlign\" ac:width=\"${imgWidth}\"><ri:url ri:value=\"${src}\"/></ac:image>")
+          println "It is an online image (${src}), so we have to use the ri:url tag and no need to upload"
         }
+        println ("img.remove() of ${img}")
         img.remove()
     }
 
@@ -514,7 +535,7 @@ def parseBody =  { body, anchors, pageAnchors ->
         body.select('a').each { link ->
 
             def src = link.attr('href')
-            println "    attachment src: "+src
+            println "📦    attachment src: "+src
 
             //upload it to confluence and use the ri:attachment tag
             if(src.startsWith(attachmentPrefix)) {
@@ -618,7 +639,7 @@ def pushToConfluence = { pageTitle, pageBody, String parentId, anchors, pageAnch
 
     def pages = retrieveAllPages(api, headers, config.confluence.spaceKey)
 
-    // println "Suche nach vorhandener Seite: " + pageTitle
+    println "Suche nach vorhandener Seite: " + pageTitle
     Map existingPage = pages[realTitleLC]
     def page
 
@@ -631,7 +652,7 @@ def pushToConfluence = { pageTitle, pageBody, String parentId, anchors, pageAnch
     } else {
         page = null
     }
-    // println "Gefunden: " + page.id + " Titel: " + page.title
+    println "Gefunden: " + page 
 
     if (page) {
         println "found existing page: " + page.id +" version "+page.version.number
@@ -649,6 +670,7 @@ def pushToConfluence = { pageTitle, pageBody, String parentId, anchors, pageAnch
         if (remoteHash == localHash) {
             println "page hasn't changed!"
             deferredUpload.each {
+                println "Defered attachment upload (remoteHash == localHash)"
                 uploadAttachment(page?.id, it[1], it[2], it[3])
             }
             deferredUpload = []
@@ -669,6 +691,7 @@ def pushToConfluence = { pageTitle, pageBody, String parentId, anchors, pageAnch
             }
             println "> updated page "+page.id
             deferredUpload.each {
+                println "Defered attachment upload (remoteHash != localHash)"
                 uploadAttachment(page.id, it[1], it[2], it[3])
             }
             deferredUpload = []
@@ -695,6 +718,7 @@ def pushToConfluence = { pageTitle, pageBody, String parentId, anchors, pageAnch
         }
         println "> created page "+page?.data?.id
         deferredUpload.each {
+            println "Defered attachment upload (create page)"
             uploadAttachment(page?.data?.id, it[1], it[2], it[3])
         }
         deferredUpload = []
@@ -722,9 +746,9 @@ pushPages = { pages, anchors, pageAnchors, labels ->
         println page.title
         def id = pushToConfluence page.title, page.body, page.parent, anchors, pageAnchors, labels
         page.children*.parent = id
-        // println "Push children von id " + id
+        println "Push children von id " + id
         pushPages page.children, anchors, pageAnchors, labels
-        // println "Ende Push children von id " + id
+        println "Ende Push children von id " + id
     }
 }
 
@@ -804,7 +828,7 @@ config.confluence.input.each { input ->
 
     // if parentId is still not set, create a new parent page (parentId = null)
     parentId = parentId ?: null
-    //println("ancestorName: '${input.ancestorName}', ancestorId: ${input.ancestorId} ---> final parentId: ${parentId}")
+    println("ancestorName: '${input.ancestorName}', ancestorId: ${input.ancestorId} ---> final parentId: ${parentId}")
 
     def anchors = [:]
     def pageAnchors = [:]
